@@ -1,0 +1,136 @@
+#!/usr/bin/env perl
+################################################################################
+# xurl - Extended Curl: Wrapper for curl that adds some useful features.
+# (c) 2024 Allen Fair. https://allenfair.com/ License: MIT
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the “Software”), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so, subject to the following
+# conditions:
+#
+# The above copyright notice and this permission notice shall be included in all copies
+# or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+# CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+# OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+################################################################################
+use strict 'vars', 'refs';
+use URI::Escape;
+my $USAGE = <<EOF;
+xurl - Extension Wrapper for curl that adds some useful features.
+
+Usage: xurl [method] URL [name=value] [+xurl options] [-curl options]
+
+* method: GET POST PUT DELETE PATCH HEAD
+* name=value           -- Param pairs, use curl features like \@filename
+* +xurloption[=value]  -- xurl meta-options
+  * +auth=userC[:pass] -- API keys, HTTP Basic Auth
+  * +j[son]            -- Ask for JSON response
+  * +y[aml]            -- Ask for YAML response
+  * +save|+o           -- Save with name in URL, like wget
+  * +p[roxy] [user:pw@]host:port -- HTTP Proxy server
+  * +d[ebug]           -- Prints command, issues curl info
+* -curlopt --curl-option -- Option to pass to curl
+
+- Env: XURL_ARGS="..." to add default curl options.
+- Follow redirect is enabled, BUT it will not forward data in POST requests.
+- Curl Basic Reference: https://allenfair.com/curl-reference/
+EOF
+
+my @cmd = qw(-Ss -L -k); # Silent, Follow redirects, Insecure allowed
+my @args = @ARGV;
+push(@args, split(/\s+/, $ENV{XURL_ARGS})) if $ENV{XURL_ARGS};
+if ($#args < 0) {
+    print $USAGE;
+    exit 1;
+}
+
+my $debug = 0;
+my $method = 'GET';
+my $url;
+my %params = ();
+my $ctype = 'query';
+while (my $a = shift(@args)) {
+  if ($a =~ /^GET|POST|PUT|DELETE|PATCH$/i) {
+    $method = uc $a;
+    add("-X", $method);
+    $ctype = "--data-urlencode" if $ctype eq 'query' && $a =~ /^POST|PUT|PATCH$/i;
+  }
+  elsif (uc($a) eq "HEAD") { add("-I"); }
+  elsif ($a eq "form") { # for Multipart with upload files
+    $ctype = '--form';
+    if ($method eq 'GET') {
+      $method = 'POST';
+      add("-X", $method);
+    }
+  }
+  elsif ($a =~ /^http/ && !$url) {
+    $url = $a;
+  }
+  elsif ($a =~ /^\+(.+)/) { # +opt, +opt=value
+    my ($o, $v) = split(/=/, $1, 2);
+    if    ($o eq "json" || $o eq 'j') { add("-H", "Accept: application/json"); }
+    elsif ($o eq "yaml" || $o eq 'y') { add("-H", "Accept: application/yaml"); }
+    elsif ($o eq "bearer") { add("--outh2-bearer", nextarg($v)); }
+    elsif ($o eq "debug" || $o eq 'd') { add("-iv"); ++$debug; }
+    elsif ($o eq "proxy" || $o eq 'p') { $v = nextarg($v); add("--proxy", "http://$v"); }
+    elsif ($o eq "save" || $o eq 'o' && $url) { # Wget-style save with URL name
+      my $file = $url;
+      $file =~ s|\?.*$||;
+      $file =~ s|\/$||;
+      $file =~ s|^.*/||;
+      add("--output", $file);
+    }
+    elsif ($o eq "auth" || $o eq 'a') {
+      $v ||= nextarg($v);
+      $v = "$v:" unless $v =~ /:/; # No password given, prevent prompting
+      add("--user", nextarg($v));
+    }
+    else { die "Unknown Option: $a"; }
+  }
+  elsif ($a =~ /^(.+)=(.+)$/) {
+    my ($o, $v) = split(/=/, $a, 2);
+    if ($method eq 'GET' && $v && $v =~ /^\@/) { # Upgrade files to FORM
+      $ctype = '--form';
+      $method = 'POST';
+      add("-X", $method);
+    }
+    $params{$o} = $v;
+  }
+  else { # Pass to curl
+    add($a);
+  }
+}
+
+# Prepare Data Params
+if ($ctype eq 'query' && scalar keys %params) {
+  while (my ($o, $v) = each %params) {
+    $a = uri_escape($o) . "=" . uri_escape($v);
+    $url .= (index($url, '?') > 0 ? "&$a" : "?$a");
+  }
+}
+elsif (scalar keys %params) {
+  while (my ($o, $v) = each %params) {
+    add($ctype, "$o=$v");
+  }
+}
+
+print join(" ", 'curl', $url, @cmd), "\n" if $debug;
+exec('curl', $url, @cmd) or die "Coutldn't exec curl $url @cmd";
+exit; # Never reached
+
+sub nextarg {
+  my ($arg) = @_;
+  $arg ? $arg : shift(@args);
+}
+
+sub add {
+  my (@a) = @_;
+  push(@cmd, @a); # TODO: escape
+}
